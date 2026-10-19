@@ -3,8 +3,10 @@ name: KDA Firestarter Monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Every 30 minutes, avoiding peak hours
+    - cron: "7,37 * * * *"
 
+  # Allow manual execution
   workflow_dispatch:
 
 permissions:
@@ -44,6 +46,7 @@ jobs:
         run: python test_products.py
 
       - name: Save product history
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
