@@ -1,0 +1,14 @@
+
+name: Schedule Test
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print timestamp
+        run: echo "Scheduled workflow triggered at $(date -u)"
