@@ -3,15 +3,17 @@ name: KDA Firestarter Monitor
 
 on:
   schedule:
-    # Every 30 minutes, avoiding peak hours
+    # Every hour at :07 and :37 (UTC)
     - cron: "7,37 * * * *"
 
-  # Allow manual execution
+  # Allow manual runs from GitHub Actions
   workflow_dispatch:
 
+# Allow updating product history
 permissions:
   contents: write
 
+# Prevent overlapping monitor runs
 concurrency:
   group: kda-firestarter-monitor
   cancel-in-progress: false
@@ -22,29 +24,35 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: true
 
+      # 2. Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
+      # 3. Install Python dependencies
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
 
+      # 4. Install Playwright Chromium
       - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
 
+      # 5. Scan products and send Telegram notifications
       - name: Scan Riot Merch and notify Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python test_products.py
 
+      # 6. Save new product history
       - name: Save product history
         if: success()
         run: |
@@ -55,7 +63,7 @@ jobs:
 
           if ! git diff --cached --quiet; then
             git commit -m "Update monitored Riftbound products"
-            git push
+            git push origin HEAD:main
           else
             echo "No product history changes."
           fi
