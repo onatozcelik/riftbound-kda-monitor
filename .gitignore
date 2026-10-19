@@ -1,0 +1,23 @@
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Test data
+test_known_products.json
+
+# Local outputs
+riftbound_products.json
+
+# Temporary files
+*.tmp
+
+# IDE
+.vscode/
+.idea/
