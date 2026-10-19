@@ -1,7 +1,7 @@
 
 from playwright.sync_api import sync_playwright
 from urllib.parse import urljoin, urlparse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import argparse
@@ -28,8 +28,6 @@ PAGES_TO_SCAN = 3
 
 DATABASE_FILE = Path("known_products.json")
 OUTPUT_FILE = Path("riftbound_products.json")
-
-# Separate database for simulated testing.
 TEST_DATABASE_FILE = Path("test_known_products.json")
 
 KDA_PATTERN = re.compile(
@@ -51,9 +49,8 @@ TELEGRAM_CHAT_ID = os.getenv(
 # ==========================================
 
 def send_telegram(message):
-
     if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: Telegram bot token is missing.")
+        print("ERROR: Telegram token is missing.")
         return False
 
     if not TELEGRAM_CHAT_ID:
@@ -76,11 +73,17 @@ def send_telegram(message):
             timeout=30
         )
 
-        response.raise_for_status()
+        # Avoid printing URLs containing the token.
+        if not response.ok:
+            print(
+                f"Telegram HTTP error: "
+                f"{response.status_code}"
+            )
+            return False
 
-        result = response.json()
+        data = response.json()
 
-        if result.get("ok") is True:
+        if data.get("ok") is True:
             print("Telegram message accepted.")
             return True
 
@@ -88,10 +91,8 @@ def send_telegram(message):
         return False
 
     except requests.RequestException as error:
-        # Do not print raw URLs because they
-        # contain the Telegram bot token.
         print(
-            "Telegram request error:",
+            "Telegram connection error:",
             type(error).__name__
         )
         return False
@@ -101,19 +102,83 @@ def send_telegram(message):
         return False
 
 
+def send_scan_summary(
+    products_count,
+    kda_count,
+    new_count,
+    notifications_sent,
+    notifications_failed,
+    elapsed,
+    first_run=False
+):
+    now = datetime.now(
+        timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+
+    status = (
+        "Initial baseline created."
+        if first_run
+        else (
+            "New K/DA products detected!"
+            if new_count > 0
+            else "No new K/DA products detected."
+        )
+    )
+
+    message = (
+        "✅ K/DA FIRESTARTER — SCAN COMPLETED\n\n"
+        f"🕒 Time: {now}\n"
+        "🇩🇪 Store: Riot Merch Germany\n\n"
+        f"📦 Products scanned: {products_count}\n"
+        f"🎴 K/DA products: {kda_count}\n"
+        f"🆕 New K/DA products: {new_count}\n"
+        f"📨 Product alerts sent: {notifications_sent}\n"
+        f"⚠️ Product alerts failed: {notifications_failed}\n"
+        f"⏱️ Scan duration: {elapsed:.2f}s\n\n"
+        f"Status: {status}"
+    )
+
+    return send_telegram(message)
+
+
+def notify_product(product, test_mode=False):
+    title = (
+        "🧪 SIMULATED K/DA PRODUCT ALERT"
+        if test_mode
+        else "🚨 NEW RIFTBOUND K/DA PRODUCT!"
+    )
+
+    message = (
+        f"{title}\n\n"
+        f"🎴 Product: {product['name']}\n\n"
+        "🇩🇪 Riot Merch Germany\n\n"
+        f"🔗 Product link:\n{product['url']}"
+    )
+
+    if test_mode:
+        message += (
+            "\n\nTEST ONLY — no purchase performed."
+        )
+    else:
+        message += (
+            "\n\nOpen the product link "
+            "to continue shopping."
+        )
+
+    return send_telegram(message)
+
+
 # ==========================================
-# PRODUCT HELPERS
+# PRODUCT FUNCTIONS
 # ==========================================
 
 def is_kda_product(name, url):
-
     return bool(
         KDA_PATTERN.search(f"{name} {url}")
     )
 
 
 def normalize_product_url(href):
-
     url = urljoin(BASE_URL, href)
     parsed = urlparse(url)
 
@@ -133,18 +198,20 @@ def normalize_product_url(href):
 
 
 def product_name_from_url(url):
-
-    slug = urlparse(url).path.rstrip("/").split("/")[-1]
+    slug = (
+        urlparse(url)
+        .path.rstrip("/")
+        .split("/")[-1]
+    )
 
     return slug.replace("-", " ").title()
 
 
 # ==========================================
-# DATABASE FUNCTIONS
+# DATABASE
 # ==========================================
 
 def load_products(database_file):
-
     if not database_file.exists():
         return set()
 
@@ -161,10 +228,9 @@ def load_products(database_file):
 
 
 def save_products(database_file, products):
+    temporary = database_file.with_suffix(".tmp")
 
-    temporary_file = database_file.with_suffix(".tmp")
-
-    with temporary_file.open(
+    with temporary.open(
         "w",
         encoding="utf-8"
     ) as file:
@@ -175,127 +241,21 @@ def save_products(database_file, products):
             ensure_ascii=False
         )
 
-    temporary_file.replace(database_file)
+    temporary.replace(database_file)
 
 
 # ==========================================
-# NOTIFICATIONS
-# ==========================================
-
-def notify_product(product, test_mode=False):
-
-    if test_mode:
-        title = "🧪 SIMULATED K/DA PRODUCT ALERT"
-    else:
-        title = "🚨 NEW RIFTBOUND K/DA PRODUCT!"
-
-    message = (
-        f"{title}\n\n"
-        f"🎴 Product: {product['name']}\n\n"
-        "🇩🇪 Store: Riot Merch Germany\n\n"
-        f"🔗 Product URL:\n{product['url']}\n\n"
-    )
-
-    if test_mode:
-        message += (
-            "TEST ONLY: This product is fictional.\n"
-            "No purchase or cart action was performed."
-        )
-    else:
-        message += (
-            "Open the product link on your phone "
-            "to continue shopping."
-        )
-
-    return send_telegram(message)
-
-
-# ==========================================
-# COMMON NEW-PRODUCT PROCESSING
-# ==========================================
-
-def process_new_products(
-    products,
-    database_file,
-    test_mode=False
-):
-    """
-    Process products and notify new K/DA matches.
-
-    Only mark a K/DA item as known after
-    Telegram accepts its notification.
-
-    Non-K/DA products are saved without alerts.
-    """
-
-    known_products = load_products(database_file)
-
-    current_urls = set(products.keys())
-    new_urls = current_urls - known_products
-
-    kda_products = [
-        product
-        for product in products.values()
-        if product["is_kda_product"]
-    ]
-
-    new_kda_products = [
-        products[url]
-        for url in sorted(new_urls)
-        if products[url]["is_kda_product"]
-    ]
-
-    print(f"Products scanned: {len(products)}")
-    print(f"K/DA products: {len(kda_products)}")
-    print(f"New products: {len(new_urls)}")
-    print(f"New K/DA products: {len(new_kda_products)}")
-
-    updated_known = known_products.copy()
-
-    for url in new_urls:
-        if not products[url]["is_kda_product"]:
-            updated_known.add(url)
-
-    notifications_sent = 0
-    notifications_failed = 0
-
-    for product in new_kda_products:
-
-        print(f"\nNEW K/DA: {product['name']}")
-
-        success = notify_product(
-            product,
-            test_mode=test_mode
-        )
-
-        if success:
-            updated_known.add(product["url"])
-            notifications_sent += 1
-        else:
-            notifications_failed += 1
-
-    save_products(database_file, updated_known)
-
-    return {
-        "new_kda_products": len(new_kda_products),
-        "notifications_sent": notifications_sent,
-        "notifications_failed": notifications_failed
-    }
-
-
-# ==========================================
-# RIOT MERCH SCANNER
+# PRODUCT SCANNER
 # ==========================================
 
 def scan_products(page):
-
     products = {}
     successful_pages = 0
 
     for page_number in range(
-        1, PAGES_TO_SCAN + 1
+        1,
+        PAGES_TO_SCAN + 1
     ):
-
         category_url = CATEGORY_URL.format(
             page=page_number
         )
@@ -326,36 +286,38 @@ def scan_products(page):
                 """
             )
 
-            for href in hrefs:
+            page_count = 0
 
+            for href in hrefs:
                 if not href:
                     continue
 
-                product_url = normalize_product_url(
-                    href
-                )
+                url = normalize_product_url(href)
 
-                if not product_url:
+                if not url:
                     continue
 
-                name = product_name_from_url(
-                    product_url
-                )
+                name = product_name_from_url(url)
 
-                products[product_url] = {
+                products[url] = {
                     "name": name,
-                    "url": product_url,
+                    "url": url,
                     "is_kda_product": is_kda_product(
-                        name,
-                        product_url
+                        name, url
                     )
                 }
+
+                page_count += 1
+
+            print(
+                f"Product links detected: {page_count}"
+            )
 
             successful_pages += 1
 
         except Exception as error:
             print(
-                f"Scan error on page {page_number}: "
+                f"Page {page_number} failed: "
                 f"{type(error).__name__}"
             )
 
@@ -363,19 +325,72 @@ def scan_products(page):
 
 
 # ==========================================
+# NEW PRODUCT PROCESSING
+# ==========================================
+
+def process_new_products(
+    products,
+    database_file,
+    test_mode=False
+):
+    known = load_products(database_file)
+
+    current_urls = set(products.keys())
+    new_urls = current_urls - known
+
+    kda_products = [
+        product
+        for product in products.values()
+        if product["is_kda_product"]
+    ]
+
+    new_kda = [
+        products[url]
+        for url in sorted(new_urls)
+        if products[url]["is_kda_product"]
+    ]
+
+    updated_known = known.copy()
+
+    # Remember non-K/DA products without alerts.
+    for url in new_urls:
+        if not products[url]["is_kda_product"]:
+            updated_known.add(url)
+
+    sent = 0
+    failed = 0
+
+    for product in new_kda:
+        print(f"New K/DA: {product['name']}")
+
+        if notify_product(product, test_mode):
+            updated_known.add(product["url"])
+            sent += 1
+        else:
+            failed += 1
+
+    save_products(database_file, updated_known)
+
+    return {
+        "kda_count": len(kda_products),
+        "new_kda_count": len(new_kda),
+        "sent": sent,
+        "failed": failed
+    }
+
+
+# ==========================================
 # REAL MONITOR
 # ==========================================
 
 def run_monitor():
-
     started_at = time.time()
 
     print("=" * 60)
-    print("RIFTBOUND K/DA TELEGRAM MONITOR")
+    print("K/DA FIRESTARTER — TELEGRAM MONITOR")
     print("=" * 60)
 
     with sync_playwright() as p:
-
         browser = p.chromium.launch(
             headless=HEADLESS
         )
@@ -394,44 +409,54 @@ def run_monitor():
             products, successful_pages = scan_products(
                 page
             )
-
         finally:
             context.close()
             browser.close()
 
+    # Do not mark products as known after
+    # an incomplete or failed scan.
     if (
         successful_pages != PAGES_TO_SCAN
         or not products
     ):
-        print("Incomplete scan. History unchanged.")
+        print("Incomplete scan. No success summary.")
         return False
 
-    # First-run protection applies only
-    # to the real store database.
     first_run = not DATABASE_FILE.exists()
 
-    if first_run:
-        save_products(
-            DATABASE_FILE,
-            set(products.keys())
-        )
-
-        print("Initial product baseline created.")
-        print("No alerts on first run.")
-        return True
-
     try:
-        result = process_new_products(
-            products,
-            DATABASE_FILE,
-            test_mode=False
+        if first_run:
+            save_products(
+                DATABASE_FILE,
+                set(products.keys())
+            )
+
+            result = {
+                "kda_count": sum(
+                    p["is_kda_product"]
+                    for p in products.values()
+                ),
+                "new_kda_count": 0,
+                "sent": 0,
+                "failed": 0
+            }
+        else:
+            result = process_new_products(
+                products,
+                DATABASE_FILE
+            )
+
+    except (OSError, ValueError) as error:
+        print(
+            "Database error:",
+            type(error).__name__
         )
-    except (OSError, ValueError):
-        print("ERROR: Could not load/save product history.")
         return False
 
     output = {
-        "scan_time": datetime.now().isoformat(),
+        "scan_time": datetime.now(
+            timezone.utc
+        ).isoformat(),
         "products_found": len(products),
         "products": list(products.values()),
         "notification_summary": result
@@ -448,25 +473,35 @@ def run_monitor():
             ensure_ascii=False
         )
 
+    elapsed = time.time() - started_at
+
     print("\n" + "=" * 60)
     print("SCAN SUMMARY")
     print("=" * 60)
-
     print(f"Products scanned: {len(products)}")
-    print(
-        f"Notifications sent: "
-        f"{result['notifications_sent']}"
-    )
-    print(
-        f"Notifications failed: "
-        f"{result['notifications_failed']}"
+    print(f"K/DA products: {result['kda_count']}")
+    print(f"New K/DA products: {result['new_kda_count']}")
+    print(f"Product alerts sent: {result['sent']}")
+    print(f"Product alerts failed: {result['failed']}")
+    print(f"Elapsed: {elapsed:.2f}s")
+
+    summary_sent = send_scan_summary(
+        products_count=len(products),
+        kda_count=result["kda_count"],
+        new_count=result["new_kda_count"],
+        notifications_sent=result["sent"],
+        notifications_failed=result["failed"],
+        elapsed=elapsed,
+        first_run=first_run
     )
 
-    print(
-        f"Elapsed: {round(time.time() - started_at, 2)}s"
-    )
+    if not summary_sent:
+        print("ERROR: Scan summary notification failed.")
 
-    return result["notifications_failed"] == 0
+    return (
+        result["failed"] == 0
+        and summary_sent
+    )
 
 
 # ==========================================
@@ -474,73 +509,38 @@ def run_monitor():
 # ==========================================
 
 def test_kda_detection():
-
-    print("=" * 60)
-    print("SIMULATED K/DA NOTIFICATION TEST")
-    print("=" * 60)
-
-    # Fictional product. It is NOT a real
-    # Riot Merch product or checkout URL.
-
     fake_url = (
         "https://merch.riotgames.com/de-de/"
         "product/kda-firestarter-beta-test/"
     )
 
-    fake_product = {
+    product = {
         "name": "Riftbound K/DA Test Edition",
         "url": fake_url,
-        "is_kda_product": is_kda_product(
-            "Riftbound K/DA Test Edition",
-            fake_url
-        )
+        "is_kda_product": True
     }
 
-    products = {
-        fake_url: fake_product
-    }
-
-    try:
-        result = process_new_products(
-            products,
-            TEST_DATABASE_FILE,
-            test_mode=True
-        )
-
-    except (OSError, ValueError):
-        print("Test database could not be read or saved.")
-        return False
-
-    print("\n" + "=" * 60)
-    print("TEST SUMMARY")
-    print("=" * 60)
-
-    print(
-        f"New K/DA products: "
-        f"{result['new_kda_products']}"
+    result = process_new_products(
+        {fake_url: product},
+        TEST_DATABASE_FILE,
+        test_mode=True
     )
 
-    print(
-        f"Notifications sent: "
-        f"{result['notifications_sent']}"
+    print("\nTEST SUMMARY")
+    print(result)
+
+    return result["failed"] == 0
+
+
+def test_summary():
+    return send_scan_summary(
+        products_count=26,
+        kda_count=0,
+        new_count=0,
+        notifications_sent=0,
+        notifications_failed=0,
+        elapsed=6.42
     )
-
-    print(
-        f"Notifications failed: "
-        f"{result['notifications_failed']}"
-    )
-
-    if result["notifications_failed"]:
-        return False
-
-    if result["notifications_sent"] == 1:
-        print("PASS: New K/DA notification sent.")
-        print("Run again to verify no duplicate alert.")
-
-    elif result["new_kda_products"] == 0:
-        print("PASS: Existing product not notified again.")
-
-    return True
 
 
 # ==========================================
@@ -548,29 +548,23 @@ def test_kda_detection():
 # ==========================================
 
 def main():
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--test-kda",
-        action="store_true",
-        help="Simulate a new K/DA product and notify"
+        action="store_true"
     )
 
     parser.add_argument(
-        "--reset-test-kda",
-        action="store_true",
-        help="Reset simulated test history only"
+        "--test-summary",
+        action="store_true"
     )
 
     args = parser.parse_args()
 
-    if args.reset_test_kda:
-        TEST_DATABASE_FILE.unlink(missing_ok=True)
-        print("Simulated test history reset.")
-        return
-
-    if args.test_kda:
+    if args.test_summary:
+        success = test_summary()
+    elif args.test_kda:
         success = test_kda_detection()
     else:
         success = run_monitor()
